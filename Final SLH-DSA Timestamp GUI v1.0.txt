@@ -1,0 +1,171 @@
+```toml
+[package]
+name = "final_gui_v1.0_core"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+post_quantum_crypto = { path = "../post_quantum_crypto" }
+eframe = "0.24"
+hex = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+```
+
+```rust
+use eframe::egui;
+use post_quantum_crypto::apps::timestamp::SlhDsaTimestamp;
+use std::fs;
+
+#[derive(Default)]
+struct TimestampApp {
+    file_path: Option<String>,
+    proof_path: Option<String>,
+    status: String,
+    mode: Mode,
+}
+
+#[derive(Default, PartialEq)]
+enum Mode { Timestamp, Verify }
+
+impl eframe::App for TimestampApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("SLH-DSA Timestamp v1.0");
+
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.mode == Mode::Timestamp, "Timestamp").clicked() { self.mode = Mode::Timestamp; self.reset(); }
+                if ui.selectable_label(self.mode == Mode::Verify, "Verify").clicked() { self.mode = Mode::Verify; self.reset(); }
+            });
+
+            if ui.button("Choose File").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    self.file_path = Some(path.display().to_string());
+                    self.status = "".to_string();
+                }
+            }
+
+            if let Some(path) = &self.file_path {
+                ui.label(format!("File: {}", path));
+                let btn = if self.mode == Mode::Timestamp { "Create Timestamp" } else { "Choose Proof" };
+                if ui.button(btn).clicked() {
+                    if self.mode == Mode::Timestamp {
+                        self.create_timestamp(path);
+                    } else {
+                        self.choose_proof();
+                    }
+                }
+            }
+
+            if let Some(path) = &self.proof_path {
+                ui.label(format!("Proof: {}", path));
+                if self.mode == Mode::Verify && ui.button("Verify Timestamp").clicked() {
+                    self.verify_timestamp();
+                }
+            }
+
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
+        });
+    }
+}
+
+impl TimestampApp {
+    fn reset(&mut self) {
+        self.file_path = None;
+        self.proof_path = None;
+        self.status = "".to_string();
+    }
+
+    fn create_timestamp(&mut self, path: &str) {
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(e) => { self.status = format!("Read error: {}", e); return; }
+        };
+        let app = SlhDsaTimestamp::new();
+        let (sig, pk, hash, ts) = match app.timestamp_file(&data) {
+            Ok(v) => v,
+            Err(e) => { self.status = format!("Error: {:?}", e); return; }
+        };
+        let proof = serde_json::json!({
+            "signature": hex::encode(&sig),
+            "public_key": hex::encode(&pk),
+            "file_hash": hash,
+            "timestamp": ts,
+            "filename": std::path::Path::new(path).file_name().unwrap().to_string_lossy()
+        });
+        let out = format!("{}.timestamp.json", path);
+        if fs::write(&out, proof.to_string()).is_ok() {
+            self.status = format!("Timestamped → {}", out);
+        } else {
+            self.status = "Save failed".to_string();
+        }
+    }
+
+    fn choose_proof(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            self.proof_path = Some(path.display().to_string());
+        }
+    }
+
+    fn verify_timestamp(&mut self) {
+        let file = self.file_path.as_ref().unwrap();
+        let proof = self.proof_path.as_ref().unwrap();
+        let data = match fs::read(file) {
+            Ok(d) => d,
+            Err(e) => { self.status = format!("Read error: {}", e); return; }
+        };
+        let json = match fs::read_to_string(proof) {
+            Ok(j) => j,
+            Err(e) => { self.status = format!("Read error: {}", e); return; }
+        };
+        let proof_val: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(p) => p,
+            Err(e) => { self.status = format!("JSON error: {}", e); return; }
+        };
+        let sig = hex::decode(proof_val["signature"].as_str().unwrap()).unwrap();
+        let pk = hex::decode(proof_val["public_key"].as_str().unwrap()).unwrap();
+        let hash = proof_val["file_hash"].as_str().unwrap().to_string();
+        let ts = proof_val["timestamp"].as_str().unwrap().to_string();
+
+        let app = SlhDsaTimestamp::new();
+        if app.verify_timestamp(&data, &sig, &pk, &hash, &ts).unwrap() {
+            self.status = "Verified".to_string();
+        } else {
+            self.status = "Failed".to_string();
+        }
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "SLH-DSA Timestamp",
+        options,
+        Box::new(|_cc| Box::new(TimestampApp::default())),
+    )
+}
+```
+
+---
+
+**FINAL_Gui_v1.0_core**  
+- **Timestamp**: Choose file → **Create Timestamp** → `.timestamp.json`  
+- **Verify**: Choose file → **Choose Proof** → **Verify Timestamp** → Verified  
+
+---
+
+**Build & Run:**
+```bash
+cargo build --release
+./target/release/final_gui_v1.0_core
+```
+
+---
+
+**Next?**  
+Say: **Make Android**  
+→ I’ll give you **FINAL_Android_v1.0.apk**
+
+**Go.**

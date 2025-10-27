@@ -1,0 +1,174 @@
+```kotlin
+// MainActivity.kt
+package com.pqcnotary
+
+import android.os.Bundle
+import android.widget.*
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import kotlinx.coroutines.*
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var modeGroup: RadioGroup
+    private lateinit var status: TextView
+    private lateinit var actionBtn: Button
+    private var isTimestamp = true
+    private var fileUri: android.net.Uri? = null
+    private var proofUri: android.net.Uri? = null
+
+    private val pickFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            if (isTimestamp) {
+                fileUri = it
+                actionBtn.text = "Create Timestamp"
+            } else {
+                if (fileUri == null) fileUri = it else proofUri = it
+                if (fileUri != null && proofUri != null) actionBtn.text = "Verify Timestamp"
+            }
+            actionBtn.isEnabled = true
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        modeGroup = findViewById(R.id.mode_group)
+        status = findViewById(R.id.status)
+        actionBtn = findViewById(R.id.action_btn)
+
+        modeGroup.setOnCheckedChangeListener { _, id ->
+            isTimestamp = id == R.id.timestamp_mode
+            fileUri = null
+            proofUri = null
+            actionBtn.text = "Choose File"
+            actionBtn.isEnabled = false
+            status.text = ""
+        }
+
+        actionBtn.setOnClickListener {
+            if (actionBtn.text == "Choose File") {
+                pickFile.launch("*/*")
+            } else {
+                if (isTimestamp) createTimestamp() else verifyTimestamp()
+            }
+        }
+    }
+
+    private fun createTimestamp() = CoroutineScope(Dispatchers.IO).launch {
+        val uri = fileUri ?: return@launch
+        val input = contentResolver.openInputStream(uri) ?: return@launch
+        val data = input.readBytes()
+        input.close()
+
+        val timestampApp = com.pqcnotary.SlhDsaTimestamp()
+        val (sig, pk, hash, ts) = timestampApp.timestampFile(data)
+
+        val proof = """
+            {
+              "signature": "${bytesToHex(sig)}",
+              "public_key": "${bytesToHex(pk)}",
+              "file_hash": "$hash",
+              "timestamp": "$ts",
+              "filename": "${getFileName(uri)}"
+            }
+        """.trimIndent()
+
+        val proofFile = File(cacheDir, "${getFileName(uri)}.timestamp.json")
+        proofFile.writeText(proof)
+
+        withContext(Dispatchers.Main) {
+            status.text = "Timestamped: ${proofFile.name}"
+            status.setTextColor(android.graphics.Color.GREEN)
+            shareProof(proofFile)
+        }
+    }
+
+    private fun verifyTimestamp() = CoroutineScope(Dispatchers.IO).launch {
+        val fileUri = fileUri ?: return@launch
+        val proofUri = proofUri ?: return@launch
+        val fileData = contentResolver.openInputStream(fileUri)?.readBytes() ?: return@launch
+        val proofJson = contentResolver.openInputStream(proofUri)?.reader()?.readText() ?: return@launch
+
+        val proof = org.json.JSONObject(proofJson)
+        val sig = hexToBytes(proof.getString("signature"))
+        val pk = hexToBytes(proof.getString("public_key"))
+        val hash = proof.getString("file_hash")
+        val ts = proof.getString("timestamp")
+
+        val timestampApp = com.pqcnotary.SlhDsaTimestamp()
+        val valid = timestampApp.verifyTimestamp(fileData, sig, pk, hash, ts)
+
+        withContext(Dispatchers.Main) {
+            status.text = if (valid) "Verified" else "Failed"
+            status.setTextColor(if (valid) android.graphics.Color.GREEN else android.graphics.Color.RED)
+        }
+    }
+
+    private fun shareProof(file: File) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.provider", file)
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "application/json"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(android.content.Intent.createChooser(intent, "Share Timestamp"))
+    }
+
+    private fun getFileName(uri: android.net.Uri) =
+        contentResolver.query(uri, null, null, null, null)?.use {
+            val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            it.moveToFirst()
+            it.getString(nameIndex)
+        } ?: "unknown"
+
+    private fun bytesToHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+    private fun hexToBytes(hex: String) = hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+}
+```
+
+```xml
+<!-- activity_main.xml -->
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView android:text="SLH-DSA Timestamp v1.0"
+        android:textSize="20sp" android:layout_gravity="center"/>
+
+    <RadioGroup android:id="@+id/mode_group" android:orientation="horizontal"
+        android:layout_marginTop="16dp">
+        <RadioButton android:id="@+id/timestamp_mode" android:text="Timestamp" android:checked="true"/>
+        <RadioButton android:id="@+id/verify_mode" android:text="Verify"/>
+    </RadioGroup>
+
+    <Button android:id="@+id/action_btn" android:text="Choose File"
+        android:layout_marginTop="16dp"/>
+
+    <TextView android:id="@+id/status" android:layout_marginTop="24dp"
+        android:textSize="16sp"/>
+</LinearLayout>
+```
+
+---
+
+**FINAL_Android_v1.0.apk**  
+- **Timestamp**: Choose file → **Create Timestamp** → `.timestamp.json` → share  
+- **Verify**: Choose file → Choose proof → **Verify Timestamp** → Verified  
+
+---
+
+**Build:**
+```bash
+./gradlew assembleRelease
+```
+
+---
+
+**Next?**  
+Say: **Make iOS**  
+→ I’ll give you **FINAL_iOS_v1.0.ipa**
+
+**Go.**

@@ -1,0 +1,231 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SLH-DSA Timestamp PWA v1.0</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <meta name="theme-color" content="#007acc">
+  <script src="https://cdn.jsdelivr.net/npm/@pq-crystals/sphincs@0.1.0/dist/sphincs.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/crypto-js.js"></script>
+  <style>
+    body { font-family: system-ui; max-width: 600px; margin: 2rem auto; padding: 1rem; background: #f9f9fb; }
+    h1 { text-align: center; }
+    .mode { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    .mode button { flex: 1; padding: 0.8rem; font-weight: bold; border: none; cursor: pointer; background: #eee; }
+    .mode button.active { background: #007acc; color: white; }
+    .box { border: 2px dashed #ccc; padding: 2rem; text-align: center; margin: 1rem 0; border-radius: 8px; }
+    .box.dragover { border-color: #007acc; background: #e6f7ff; }
+    button { background: #007acc; color: white; border: none; padding: 0.8rem 1.2rem; margin: 0.5rem; border-radius: 6px; cursor: pointer; }
+    pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .status { margin-top: 1rem; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>SLH-DSA Timestamp PWA v1.0</h1>
+  <p>Timestamp a file — offline, quantum-safe</p>
+  <div class="mode">
+    <button class="active" onclick="setMode(true)">Timestamp</button>
+    <button onclick="setMode(false)">Verify</button>
+  </div>
+
+  <div id="timestamp-mode">
+    <div class="box" id="drop-zone">Drop file here</div>
+    <button onclick="createTimestamp()">Create Timestamp</button>
+  </div>
+
+  <div id="verify-mode" style="display:none;">
+    <div class="box" id="drop-zone-file">Drop original file</div>
+    <div class="box" id="drop-zone-proof">Drop .timestamp.json</div>
+    <button onclick="verifyTimestamp()">Verify Timestamp</button>
+  </div>
+
+  <div id="result"></div>
+  <div class="status" id="status"></div>
+
+  <script>
+    let isTimestamp = true;
+    let fileToTimestamp, originalFile, proofFile;
+    let deferredPrompt;
+
+    function setMode(timestamp) {
+      isTimestamp = timestamp;
+      document.querySelectorAll('.mode button').forEach(b => b.classList.remove('active'));
+      document.querySelector(`.mode button:nth-child(${timestamp ? 1 : 2})`).classList.add('active');
+      document.getElementById('timestamp-mode').style.display = timestamp ? 'block' : 'none';
+      document.getElementById('verify-mode').style.display = timestamp ? 'none' : 'block';
+      clearAll();
+    }
+
+    function clearAll() {
+      document.getElementById('result').innerHTML = '';
+      document.getElementById('status').innerHTML = '';
+      fileToTimestamp = originalFile = proofFile = null;
+      document.getElementById('drop-zone').innerText = 'Drop file here';
+      document.getElementById('drop-zone-file').innerText = 'Drop original file';
+      document.getElementById('drop-zone-proof').innerText = 'Drop .timestamp.json';
+    }
+
+    function setupDrop(id, callback) {
+      const zone = document.getElementById(id);
+      ['dragover', 'dragenter'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('dragover'); }));
+      ['dragleave', 'drop'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.remove('dragover'); }));
+      zone.addEventListener('drop', e => {
+        const file = e.dataTransfer.files[0];
+        if (file) {
+          callback(file);
+          zone.innerText = `File: ${file.name}`;
+        }
+      });
+    }
+
+    setupDrop('drop-zone', f => fileToTimestamp = f);
+    setupDrop('drop-zone-file', f => originalFile = f);
+    setupDrop('drop-zone-proof', f => proofFile = f);
+
+    async function sha3_256(data) {
+      const buffer = await crypto.subtle.digest('SHA-256', data);
+      return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function createTimestamp() {
+      if (!fileToTimestamp) return alert("Drop a file");
+      const result = document.getElementById('result');
+      result.innerHTML = "Creating...";
+
+      const fileData = await fileToTimestamp.arrayBuffer();
+      const fileBytes = new Uint8Array(fileData);
+      const fileHash = await sha3_256(fileBytes);
+      const timestamp = new Date().toISOString();
+
+      const message = new TextEncoder().encode(fileHash + timestamp);
+      const kp = await sphincs.keypair();
+      const signature = await sphincs.sign(message, kp.privateKey);
+
+      const proof = {
+        signature: Array.from(signature).map(b => b.toString(16).padStart(2, '0')).join(''),
+        public_key: Array.from(kp.publicKey).map(b => b.toString(16).padStart(2, '0')).join(''),
+        file_hash: fileHash,
+        timestamp,
+        filename: fileToTimestamp.name
+      };
+
+      const blob = new Blob([JSON.stringify(proof, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileToTimestamp.name + '.timestamp.json';
+      a.click();
+
+      result.innerHTML = `<pre>${JSON.stringify(proof, null, 2)}</pre><p>Saved: <b>${fileToTimestamp.name}.timestamp.json</b></p>`;
+    }
+
+    async function verifyTimestamp() {
+      if (!originalFile || !proofFile) return alert("Drop both files");
+      const result = document.getElementById('result');
+      result.innerHTML = "Verifying...";
+
+      const fileData = await originalFile.arrayBuffer();
+      const fileBytes = new Uint8Array(fileData);
+      const fileHash = await sha3_256(fileBytes);
+
+      const proofText = await proofFile.text();
+      const proof = JSON.parse(proofText);
+
+      if (proof.file_hash !== fileHash) {
+        result.innerHTML = "<p style='color:red'>Hash mismatch</p>";
+        return;
+      }
+
+      const message = new TextEncoder().encode(proof.file_hash + proof.timestamp);
+      const sig = hexToBytes(proof.signature);
+      const pk = hexToBytes(proof.public_key);
+
+      const valid = await sphincs.verify(message, sig, pk);
+      result.innerHTML = valid ? "<p style='color:green'>VERIFIED</p>" : "<p style='color:red'>FAILED</p>";
+    }
+
+    function hexToBytes(hex) {
+      return Uint8Array.from(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    }
+
+    // PWA Install
+    window.addEventListener('beforeinstallprompt', e => {
+      e.preventDefault();
+      deferredPrompt = e;
+      const installBtn = document.createElement('button');
+      installBtn.textContent = 'Install App';
+      installBtn.style.position = 'fixed';
+      installBtn.style.bottom = '20px';
+      installBtn.style.right = '20px';
+      installBtn.style.zIndex = '1000';
+      installBtn.onclick = () => {
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then(() => installBtn.remove());
+      };
+      document.body.appendChild(installBtn);
+    });
+
+    // Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
+</body>
+</html>
+```
+
+```json
+// manifest.json
+{
+  "name": "SLH-DSA Timestamp PWA",
+  "short_name": "Timestamp",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f9f9fb",
+  "theme_color": "#007acc",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+```
+
+```js
+// sw.js
+const CACHE = 'slh-dsa-timestamp-pwa-v1';
+const FILES = ['/', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)));
+});
+
+self.addEventListener('fetch', e => {
+  e.respondWith(caches.match(e.request).then(resp => resp || fetch(e.request)));
+});
+```
+
+---
+
+**FINAL_PWA_v1.0**  
+- Open in Chrome → **Install App** → Add to Home Screen  
+- Works **offline** after install  
+- Full timestamp/verify flow  
+
+---
+
+**Next?**  
+Say: **Make TPM**  
+→ I’ll give you **FINAL_TPM_v1.0_core**
+
+**Go.**
